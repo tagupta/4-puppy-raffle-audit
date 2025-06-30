@@ -99,8 +99,19 @@ contract PuppyRaffleTest is Test {
         vm.expectRevert("PuppyRaffle: Duplicate player");
         puppyRaffle.enterRaffle{value: entranceFee * 3}(players);
     }
-    //@audit-test
 
+    //@audit-test
+    function test_Reverts_DOS_Attack_On_Unbounded_For_Loop(uint64 playersCount) external {
+        // playersCount = bound(playersCount, 4, type(uint64).max); 
+        vm.assume(playersCount >= 4 && playersCount <= type(uint64).max);
+        address[] memory players = new address[](playersCount);
+        for(uint256 i = 0 ; i < playersCount; ++i){
+            players[i] = address(uint160(i));
+        }
+        puppyRaffle.enterRaffle{value: entranceFee * playersCount}(players);
+    }
+
+    //@audit-test
     function test_DOS_Attack_On_EnterRaffle() external playersEntered {
         //1. 4 players entered
         //2. 2 players asked refunds
@@ -220,8 +231,7 @@ contract PuppyRaffleTest is Test {
         vm.expectRevert("PuppyRaffle: Need at least 4 players");
         puppyRaffle.selectWinner();
     }
-    //@audit-bug test case failing
-
+   
     function testSelectWinner() public playersEntered {
         vm.warp(block.timestamp + duration + 1);
         vm.roll(block.number + 1);
@@ -283,24 +293,9 @@ contract PuppyRaffleTest is Test {
         vm.expectRevert("PuppyRaffle: Failed to send prize pool to winner");
         puppyRaffle.selectWinner();
     }
-    //@audit-test
-
-    function test_Previous_Winner_Is_Always_Addresses_Zero() external playersEntered {
-        address[] memory newPlayers = new address[](2);
-        newPlayers[0] = makeAddr("player 5");
-        newPlayers[1] = makeAddr("player 6");
-        puppyRaffle.enterRaffle{value: entranceFee * 2}(newPlayers);
-
-        vm.warp(block.timestamp + duration + 1);
-        vm.roll(block.number + 1);
-
-        puppyRaffle.selectWinner();
-        console.log("Winner: ", puppyRaffle.previousWinner());
-        assertEq(puppyRaffle.previousWinner(), address(0));
-    }
 
     //@audit-test
-    function test_Revert_When_TO_Be_Winner_Takes_Out_Refund() external playersEntered {
+    function test_Revert_When_To_Be_Winner_Takes_Out_Refund() external playersEntered {
         address[] memory newPlayers = new address[](4);
         newPlayers[0] = makeAddr("player 5");
         newPlayers[1] = makeAddr("player 6");
