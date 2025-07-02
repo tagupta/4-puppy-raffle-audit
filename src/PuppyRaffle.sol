@@ -5,6 +5,7 @@ import {ERC721} from "@openzeppelin/contracts/token/ERC721/ERC721.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {Address} from "@openzeppelin/contracts/utils/Address.sol";
 import {Base64} from "lib/base64/base64.sol";
+import {console2} from 'forge-std/console2.sol';
 
 /// @title PuppyRaffle
 /// @author PuppyLoveDAO
@@ -85,6 +86,7 @@ contract PuppyRaffle is ERC721, Ownable {
 
         // Check for duplicates
         //@audit-bug DOS if there are a lot of players
+        //@audit-bug frontrunning
         for (uint256 i = 0; i < players.length - 1; i++) {
             for (uint256 j = i + 1; j < players.length; j++) {
                 require(players[i] != players[j], "PuppyRaffle: Duplicate player");
@@ -97,6 +99,7 @@ contract PuppyRaffle is ERC721, Ownable {
     /// @dev This function will allow there to be blank spots in the array
     //@audit-bug Reentrancy attack - A user can claim entracefee mutiple times
     function refund(uint256 playerIndex) public {
+        //@audit-bug MEV problem
         address playerAddress = players[playerIndex];
         require(playerAddress == msg.sender, "PuppyRaffle: Only the player can refund");
         require(playerAddress != address(0), "PuppyRaffle: Player already refunded, or is not active");
@@ -125,22 +128,30 @@ contract PuppyRaffle is ERC721, Ownable {
     /// @dev we use a hash of on-chain data to generate the random numbers
     /// @dev we reset the active players array after the winner is selected
     /// @dev we send 80% of the funds to the winner, the other 20% goes to the feeAddress
-    //@audit-bug Discrepancy in the amount distribution. May try to distribute more than the contract has.
-    //@audit-bug Winner might come around as address(0)
     function selectWinner() external {
         require(block.timestamp >= raffleStartTime + raffleDuration, "PuppyRaffle: Raffle not over");
         require(players.length >= 4, "PuppyRaffle: Need at least 4 players");
+        //@audit-bug weak randomness, can be exploitable => use chainlink VRF, commit reveal scheme
         uint256 winnerIndex =
             uint256(keccak256(abi.encodePacked(msg.sender, block.timestamp, block.difficulty))) % players.length;
+        //@audit-bug Winner might come around as address(0)
         address winner = players[winnerIndex];
+        //q - Why not consider using address(this).balance?
         uint256 totalAmountCollected = players.length * entranceFee;
+        //@audit-bug Discrepancy in the amount distribution. May try to distribute more than the contract has.
         uint256 prizePool = (totalAmountCollected * 80) / 100;
         uint256 fee = (totalAmountCollected * 20) / 100;
+        console2.log("Fee: ", fee);
+        console2.log("Total Fee 1: ", uint256(totalFees));
+        //@audit-bug integer overflow
+        //@audit-bug unsafe casting of uint256 to uint64
         totalFees = totalFees + uint64(fee);
+         console2.log("Total Fee 2: ", uint256(totalFees));
 
         uint256 tokenId = totalSupply();
 
         // We use a different RNG calculate from the winnerIndex to determine rarity
+        //@audit-bug weak randomness
         uint256 rarity = uint256(keccak256(abi.encodePacked(msg.sender, block.difficulty))) % 100;
         if (rarity <= COMMON_RARITY) {
             tokenIdToRarity[tokenId] = COMMON_RARITY;
@@ -152,17 +163,21 @@ contract PuppyRaffle is ERC721, Ownable {
         delete players;
         raffleStartTime = block.timestamp;
         previousWinner = winner;
+        //@audit-bug the winner wouldn't get the money if their fallback was messed up
         (bool success,) = winner.call{value: prizePool}("");
         require(success, "PuppyRaffle: Failed to send prize pool to winner");
         _safeMint(winner, tokenId);
     }
 
     /// @notice this function will withdraw the fees to the feeAddress
-    //@audit-bug DOS if someone's got refund.
     function withdrawFees() external {
+        //@audit-bug DOS if someone's got refund.
+        //@audit-bug Money can never be withdrawn in case of the interger overflow
+        //@audit-bug Fees can't be withdrawn in case of unsafe typecasting issue
         require(address(this).balance == uint256(totalFees), "PuppyRaffle: There are currently players active!");
         uint256 feesToWithdraw = totalFees;
         totalFees = 0;
+        //@Audit - what if the feeAddress is a malicious contract with ill fallback function?
         (bool success,) = feeAddress.call{value: feesToWithdraw}("");
         require(success, "PuppyRaffle: Failed to withdraw fees");
     }
